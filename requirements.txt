@@ -10,3 +10,4 @@ scikit-learn
 albumentations
 torch
 torchvision
+plotly
