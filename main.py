@@ -1,7 +1,30 @@
 import streamlit as st
-import tensorflow as tf
-from tensorflow import keras
-import tensorflow.keras.backend as K
+import os
+import sys
+
+# Configure TensorFlow before importing
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
+try:
+    import tensorflow as tf
+    # Configure TensorFlow to avoid conflicts
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
+    
+    # Disable GPU if available to avoid memory issues
+    tf.config.set_visible_devices([], 'GPU')
+    
+    from tensorflow import keras
+    import tensorflow.keras.backend as K
+except ImportError as e:
+    st.error("TensorFlow is not installed. Please install it using: pip install tensorflow")
+    st.stop()
+except Exception as e:
+    st.error(f"Error importing TensorFlow: {str(e)}")
+    st.error("Try reinstalling TensorFlow: pip uninstall tensorflow && pip install tensorflow")
+    st.stop()
+
 import cv2
 import numpy as np
 from PIL import Image
@@ -102,12 +125,32 @@ def focal_loss_fixed(y_true, y_pred):
 @st.cache_resource
 def load_model():
     try:
+        # Clear any existing sessions
+        tf.keras.backend.clear_session()
+        
+        # Load model with custom objects
         model = keras.models.load_model('skin_cancer_detector.keras', 
-                                      custom_objects={'focal_loss_fixed': focal_loss_fixed})
+                                      custom_objects={'focal_loss_fixed': focal_loss_fixed},
+                                      compile=False)  # Don't compile to avoid issues
+        
+        # Recompile with standard optimizer if needed
+        model.compile(
+            optimizer='adam',
+            loss='categorical_crossentropy',
+            metrics=['accuracy']
+        )
+        
         return model
+    except FileNotFoundError:
+        st.error("❌ Model file 'skin_cancer_detector.keras' not found!")
+        st.error("Please make sure the model file is in the same directory as this script.")
+        return None
     except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
-        st.error("Please make sure 'skin_cancer_detector.keras' is in the same directory as this script.")
+        st.error(f"❌ Error loading model: {str(e)}")
+        st.error("Try one of these solutions:")
+        st.error("1. Reinstall TensorFlow: `pip uninstall tensorflow && pip install tensorflow`")
+        st.error("2. Make sure the model file is not corrupted")
+        st.error("3. Check TensorFlow version compatibility")
         return None
 
 # Preprocess image function
@@ -205,16 +248,23 @@ def main():
             # Add analyze button
             if st.button("🔍 Analyze Image", type="primary", use_container_width=True):
                 with st.spinner("Analyzing image... Please wait."):
-                    # Preprocess image
-                    processed_image = preprocess_image(image)
-                    
-                    # Get predictions
-                    predictions = model.predict(processed_image, verbose=0)
-                    confidence_levels = predictions[0]
-                    
-                    # Store results in session state
-                    st.session_state['predictions'] = confidence_levels
-                    st.session_state['analyzed'] = True
+                    try:
+                        # Preprocess image
+                        processed_image = preprocess_image(image)
+                        
+                        # Get predictions with error handling
+                        with tf.device('/CPU:0'):  # Force CPU usage
+                            predictions = model.predict(processed_image, verbose=0)
+                        
+                        confidence_levels = predictions[0]
+                        
+                        # Store results in session state
+                        st.session_state['predictions'] = confidence_levels
+                        st.session_state['analyzed'] = True
+                        
+                    except Exception as e:
+                        st.error(f"❌ Error during prediction: {str(e)}")
+                        st.error("Please try uploading a different image or restart the app.")
     
     with col2:
         st.header("📊 Analysis Results")
