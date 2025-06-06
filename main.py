@@ -1,117 +1,32 @@
-import streamlit as st
-import os
-import sys
+import gradio as gr
+import numpy as np
+from PIL import Image
+import cv2
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import io
+import base64
 
-# Configure TensorFlow before importing
+# Configure environment for better compatibility
+import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 try:
     import tensorflow as tf
-    # Configure TensorFlow to avoid conflicts
+    from tensorflow import keras
+    import tensorflow.keras.backend as K
+    
+    # Configure TensorFlow
     tf.config.threading.set_intra_op_parallelism_threads(1)
     tf.config.threading.set_inter_op_parallelism_threads(1)
     
-    # Disable GPU if available to avoid memory issues
+    # Disable GPU to avoid memory issues on HF Spaces
     tf.config.set_visible_devices([], 'GPU')
     
-    from tensorflow import keras
-    import tensorflow.keras.backend as K
-except ImportError as e:
-    st.error("TensorFlow is not installed. Please install it using: pip install tensorflow")
-    st.stop()
-except Exception as e:
-    st.error(f"Error importing TensorFlow: {str(e)}")
-    st.error("Try reinstalling TensorFlow: pip uninstall tensorflow && pip install tensorflow")
-    st.stop()
-
-import cv2
-import numpy as np
-from PIL import Image
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import pandas as pd
-
-# Set page config
-st.set_page_config(
-    page_title="Melanoma Detection System",
-    page_icon="🔬",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Custom CSS for better styling
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 3rem;
-        font-weight: bold;
-        text-align: center;
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 2rem;
-    }
-    
-    .sub-header {
-        font-size: 1.2rem;
-        text-align: center;
-        color: #666;
-        margin-bottom: 2rem;
-    }
-    
-    .result-card {
-        padding: 1.5rem;
-        border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        margin: 1rem 0;
-    }
-    
-    .benign-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-    }
-    
-    .malignant-card {
-        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-        color: white;
-    }
-    
-    .atypical-card {
-        background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-        color: white;
-    }
-    
-    .confidence-text {
-        font-size: 1.8rem;
-        font-weight: bold;
-        text-align: center;
-    }
-    
-    .class-text {
-        font-size: 1.4rem;
-        text-align: center;
-        margin-bottom: 0.5rem;
-    }
-    
-    .warning-box {
-        background-color: #fff3cd;
-        border: 1px solid #ffeaa7;
-        border-radius: 5px;
-        padding: 1rem;
-        margin: 1rem 0;
-    }
-    
-    .info-box {
-        background-color: #d1ecf1;
-        border: 1px solid #bee5eb;
-        border-radius: 5px;
-        padding: 1rem;
-        margin: 1rem 0;
-    }
-</style>
-""", unsafe_allow_html=True)
+    TF_AVAILABLE = True
+except ImportError:
+    TF_AVAILABLE = False
 
 # Define the custom loss function
 def focal_loss_fixed(y_true, y_pred):
@@ -121,40 +36,47 @@ def focal_loss_fixed(y_true, y_pred):
     pt_0 = tf.where(tf.equal(y_true, 0), y_pred, tf.zeros_like(y_pred))
     return -K.sum(alpha * K.pow(1. - pt_1, gamma) * K.log(pt_1))-K.sum((1-alpha) * K.pow( pt_0, gamma) * K.log(1. - pt_0))
 
-# Load model function with caching
-@st.cache_resource
-def load_model():
-    try:
-        # Clear any existing sessions
-        tf.keras.backend.clear_session()
-        
-        # Load model with custom objects
-        model = keras.models.load_model('skin_cancer_detector.keras', 
-                                      custom_objects={'focal_loss_fixed': focal_loss_fixed},
-                                      compile=False)  # Don't compile to avoid issues
-        
-        # Recompile with standard optimizer if needed
-        model.compile(
-            optimizer='adam',
-            loss='categorical_crossentropy',
-            metrics=['accuracy']
-        )
-        
-        return model
-    except FileNotFoundError:
-        st.error("❌ Model file 'skin_cancer_detector.keras' not found!")
-        st.error("Please make sure the model file is in the same directory as this script.")
-        return None
-    except Exception as e:
-        st.error(f"❌ Error loading model: {str(e)}")
-        st.error("Try one of these solutions:")
-        st.error("1. Reinstall TensorFlow: `pip uninstall tensorflow && pip install tensorflow`")
-        st.error("2. Make sure the model file is not corrupted")
-        st.error("3. Check TensorFlow version compatibility")
-        return None
+# Global model variable
+model = None
 
-# Preprocess image function
+def load_model():
+    """Load the melanoma detection model"""
+    global model
+    if not TF_AVAILABLE:
+        return "TensorFlow not available. Please install tensorflow."
+    
+    try:
+        if model is None:
+            # Clear any existing sessions
+            tf.keras.backend.clear_session()
+            
+            # Load model
+            model = keras.models.load_model(
+                'skin_cancer_detector.keras', 
+                custom_objects={'focal_loss_fixed': focal_loss_fixed},
+                compile=False
+            )
+            
+            # Recompile with standard settings
+            model.compile(
+                optimizer='adam',
+                loss='categorical_crossentropy',
+                metrics=['accuracy']
+            )
+        
+        return "Model loaded successfully!"
+    except Exception as e:
+        return f"Error loading model: {str(e)}"
+
 def preprocess_image(image):
+    """Preprocess image for model prediction"""
+    if image is None:
+        return None
+    
+    # Convert to RGB if necessary
+    if image.mode != 'RGB':
+        image = image.convert('RGB')
+    
     # Convert PIL image to numpy array
     img_array = np.array(image)
     
@@ -169,198 +91,228 @@ def preprocess_image(image):
     
     return img_batch
 
-# Create confidence chart
-def create_confidence_chart(predictions, class_names):
-    colors = ['#667eea', '#4facfe', '#f5576c']
+def create_result_plot(predictions, class_names):
+    """Create a horizontal bar plot showing prediction confidence"""
+    fig, ax = plt.subplots(figsize=(10, 6))
     
-    fig = go.Figure(data=[
-        go.Bar(x=class_names, y=predictions, 
-               marker_color=colors,
-               text=[f'{p:.2%}' for p in predictions],
-               textposition='auto')
-    ])
+    colors = ['#2E8B57', '#FF8C00', '#DC143C']  # Green, Orange, Red
     
-    fig.update_layout(
-        title="Prediction Confidence Levels",
-        xaxis_title="Classification",
-        yaxis_title="Confidence",
-        yaxis=dict(tickformat='.0%'),
-        height=400,
-        showlegend=False
-    )
+    # Create horizontal bar chart
+    bars = ax.barh(class_names, predictions, color=colors)
     
+    # Add percentage labels on bars
+    for bar, pred in zip(bars, predictions):
+        width = bar.get_width()
+        ax.text(width + 0.01, bar.get_y() + bar.get_height()/2, 
+                f'{pred:.1%}', ha='left', va='center', fontweight='bold')
+    
+    ax.set_xlabel('Confidence Level', fontsize=12, fontweight='bold')
+    ax.set_title('Melanoma Classification Results', fontsize=14, fontweight='bold')
+    ax.set_xlim(0, 1)
+    
+    # Format x-axis as percentage
+    ax.set_xticks([0, 0.2, 0.4, 0.6, 0.8, 1.0])
+    ax.set_xticklabels(['0%', '20%', '40%', '60%', '80%', '100%'])
+    
+    # Add grid for better readability
+    ax.grid(axis='x', alpha=0.3)
+    
+    # Style the plot
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    plt.tight_layout()
     return fig
 
-# Main app
-def main():
-    # Header
-    st.markdown('<h1 class="main-header">🔬 Melanoma Detection System</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">AI-Powered Skin Lesion Classification</p>', unsafe_allow_html=True)
+def predict_melanoma(image):
+    """Main prediction function"""
+    if image is None:
+        return "Please upload an image.", None, None
     
-    # Sidebar information
-    with st.sidebar:
-        st.header("ℹ️ About This Tool")
-        st.markdown("""
-        This AI model classifies skin lesions into three categories:
+    if not TF_AVAILABLE or model is None:
+        load_status = load_model()
+        if "Error" in load_status:
+            return load_status, None, None
+    
+    try:
+        # Preprocess the image
+        processed_image = preprocess_image(image)
+        if processed_image is None:
+            return "Error processing image.", None, None
         
-        **🟢 Nevus (Benign)**
-        - Common moles
-        - Generally harmless
+        # Get predictions
+        with tf.device('/CPU:0'):  # Force CPU usage
+            predictions = model.predict(processed_image, verbose=0)
         
-        **🟡 Atypical (Dysplastic)**
-        - Unusual moles
-        - May require monitoring
+        confidence_levels = predictions[0]
+        class_names = ['Nevus\n(Benign)', 'Atypical\n(Dysplastic)', 'Melanoma\n(Malignant)']
         
-        **🔴 Melanoma (Malignant)**
-        - Potentially cancerous
-        - Requires immediate medical attention
+        # Get the predicted class
+        predicted_index = np.argmax(confidence_levels)
+        predicted_class = ['Nevus', 'Atypical', 'Melanoma'][predicted_index]
+        confidence = confidence_levels[predicted_index]
+        
+        # Create result message
+        class_descriptions = {
+            0: "🟢 **NEVUS (Benign)**\n\nThis appears to be a common mole (nevus). While generally harmless, continue regular skin monitoring.",
+            1: "🟡 **ATYPICAL (Dysplastic)**\n\nThis lesion shows atypical features. Professional evaluation recommended.",
+            2: "🔴 **MELANOMA (Malignant)**\n\n⚠️ **URGENT**: This lesion shows features concerning for melanoma. Seek immediate dermatological evaluation."
+        }
+        
+        result_text = f"""
+## Prediction Results
+
+{class_descriptions[predicted_index]}
+
+**Confidence: {confidence:.1%}**
+
+---
+
+### Detailed Analysis:
+- **Nevus (Benign)**: {confidence_levels[0]:.1%}
+- **Atypical (Dysplastic)**: {confidence_levels[1]:.1%}  
+- **Melanoma (Malignant)**: {confidence_levels[2]:.1%}
+
+---
+
+⚠️ **Medical Disclaimer**: This AI tool is for educational purposes only and should not replace professional medical diagnosis. Always consult qualified healthcare providers for proper medical evaluation.
+        """
+        
+        # Create visualization
+        plot = create_result_plot(confidence_levels, class_names)
+        
+        return result_text, plot, f"Predicted: {predicted_class} ({confidence:.1%} confidence)"
+        
+    except Exception as e:
+        return f"Error during prediction: {str(e)}", None, None
+
+# Custom CSS for better styling
+custom_css = """
+#component-0 {
+    max-width: 900px;
+    margin: auto;
+}
+
+.gradio-container {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+.output-markdown h2 {
+    color: #2c3e50;
+    border-bottom: 2px solid #3498db;
+    padding-bottom: 10px;
+}
+
+.output-markdown h3 {
+    color: #34495e;
+}
+
+footer {
+    visibility: hidden;
+}
+"""
+
+# Example images for demonstration (you can add these to your HF repo)
+examples = [
+    # Add paths to example images here
+    # ["example1.jpg"],
+    # ["example2.jpg"],
+    # ["example3.jpg"],
+]
+
+# Create the Gradio interface
+def create_interface():
+    # Load model on startup
+    load_model()
+    
+    with gr.Blocks(css=custom_css, theme=gr.themes.Soft()) as interface:
+        
+        gr.HTML("""
+        <div style="text-align: center; padding: 20px;">
+            <h1 style="color: #2c3e50; margin-bottom: 10px;">🔬 Melanoma Detection System</h1>
+            <p style="color: #7f8c8d; font-size: 18px;">AI-Powered Skin Lesion Classification</p>
+        </div>
         """)
         
-        st.markdown("---")
-        st.markdown("**⚠️ Important Disclaimer**")
-        st.markdown("""
-        This tool is for educational purposes only. 
-        Always consult a qualified dermatologist for 
-        professional medical diagnosis.
-        """)
-    
-    # Load model
-    model = load_model()
-    if model is None:
-        st.stop()
-    
-    # Main content area
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        st.header("📷 Upload Image")
-        uploaded_file = st.file_uploader(
-            "Choose a skin lesion image...",
-            type=['png', 'jpg', 'jpeg'],
-            help="Upload a clear image of the skin lesion for analysis"
+        with gr.Row():
+            with gr.Column(scale=1):
+                gr.HTML("""
+                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                           color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px;">
+                    <h3 style="margin: 0; color: white;">ℹ️ About This Tool</h3>
+                    <p style="margin: 10px 0; color: white;">This AI model classifies skin lesions into:</p>
+                    <ul style="color: white; margin: 10px 0;">
+                        <li><strong>Nevus (Benign)</strong> - Common moles, generally harmless</li>
+                        <li><strong>Atypical (Dysplastic)</strong> - Unusual moles requiring monitoring</li>
+                        <li><strong>Melanoma (Malignant)</strong> - Potentially cancerous lesions</li>
+                    </ul>
+                </div>
+                """)
+                
+                image_input = gr.Image(
+                    type="pil",
+                    label="📷 Upload Skin Lesion Image",
+                    height=300
+                )
+                
+                predict_button = gr.Button(
+                    "🔍 Analyze Image", 
+                    variant="primary",
+                    size="lg"
+                )
+                
+                gr.HTML("""
+                <div style="background: #fff3cd; border: 1px solid #ffeaa7; 
+                           border-radius: 5px; padding: 15px; margin-top: 20px;">
+                    <strong>⚠️ Important:</strong> This tool is for educational purposes only. 
+                    Always consult a qualified dermatologist for professional medical diagnosis.
+                </div>
+                """)
+            
+            with gr.Column(scale=1):
+                result_output = gr.Markdown(
+                    label="📊 Analysis Results",
+                    value="Upload an image and click 'Analyze' to see results."
+                )
+                
+                plot_output = gr.Plot(
+                    label="📈 Confidence Visualization"
+                )
+                
+                status_output = gr.Textbox(
+                    label="Status",
+                    interactive=False
+                )
+        
+        # Add examples if available
+        if examples:
+            gr.Examples(
+                examples=examples,
+                inputs=image_input,
+                label="📋 Example Images"
+            )
+        
+        # Connect the predict function
+        predict_button.click(
+            fn=predict_melanoma,
+            inputs=image_input,
+            outputs=[result_output, plot_output, status_output]
         )
         
-        if uploaded_file is not None:
-            # Display uploaded image
-            image = Image.open(uploaded_file)
-            st.image(image, caption="Uploaded Image", use_column_width=True)
-            
-            # Add analyze button
-            if st.button("🔍 Analyze Image", type="primary", use_container_width=True):
-                with st.spinner("Analyzing image... Please wait."):
-                    try:
-                        # Preprocess image
-                        processed_image = preprocess_image(image)
-                        
-                        # Get predictions with error handling
-                        with tf.device('/CPU:0'):  # Force CPU usage
-                            predictions = model.predict(processed_image, verbose=0)
-                        
-                        confidence_levels = predictions[0]
-                        
-                        # Store results in session state
-                        st.session_state['predictions'] = confidence_levels
-                        st.session_state['analyzed'] = True
-                        
-                    except Exception as e:
-                        st.error(f"❌ Error during prediction: {str(e)}")
-                        st.error("Please try uploading a different image or restart the app.")
+        gr.HTML("""
+        <div style="text-align: center; margin-top: 30px; padding: 20px; 
+                   background: #f8f9fa; border-radius: 10px;">
+            <h3>🏥 Medical Disclaimer</h3>
+            <p>This AI tool is designed for educational and research purposes only. 
+            It should not be used as a substitute for professional medical advice, 
+            diagnosis, or treatment. Always seek the advice of qualified healthcare 
+            providers with questions about medical conditions.</p>
+        </div>
+        """)
     
-    with col2:
-        st.header("📊 Analysis Results")
-        
-        if 'analyzed' in st.session_state and st.session_state['analyzed']:
-            predictions = st.session_state['predictions']
-            class_names = ['Nevus', 'Atypical', 'Melanoma']
-            class_descriptions = ['Benign (Safe)', 'Dysplastic (Monitor)', 'Malignant (Urgent)']
-            
-            # Get predicted class
-            predicted_index = np.argmax(predictions)
-            predicted_class = class_names[predicted_index]
-            confidence = predictions[predicted_index]
-            
-            # Display main prediction
-            if predicted_index == 0:  # Nevus
-                st.markdown(f"""
-                <div class="result-card benign-card">
-                    <div class="class-text">🟢 {predicted_class}</div>
-                    <div class="class-text">{class_descriptions[predicted_index]}</div>
-                    <div class="confidence-text">{confidence:.1%} Confidence</div>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                st.markdown("""
-                <div class="info-box">
-                    <strong>Assessment: Likely Benign</strong><br>
-                    This appears to be a common mole (nevus). While generally harmless, 
-                    continue regular skin monitoring and consult a dermatologist if you notice any changes.
-                </div>
-                """, unsafe_allow_html=True)
-                
-            elif predicted_index == 1:  # Atypical
-                st.markdown(f"""
-                <div class="result-card atypical-card">
-                    <div class="class-text">🟡 {predicted_class}</div>
-                    <div class="class-text">{class_descriptions[predicted_index]}</div>
-                    <div class="confidence-text">{confidence:.1%} Confidence</div>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                st.markdown("""
-                <div class="warning-box">
-                    <strong>Assessment: Atypical/Dysplastic</strong><br>
-                    This lesion shows atypical features. While not necessarily cancerous, 
-                    it requires professional evaluation and may need regular monitoring.
-                </div>
-                """, unsafe_allow_html=True)
-                
-            else:  # Melanoma
-                st.markdown(f"""
-                <div class="result-card malignant-card">
-                    <div class="class-text">🔴 {predicted_class}</div>
-                    <div class="class-text">{class_descriptions[predicted_index]}</div>
-                    <div class="confidence-text">{confidence:.1%} Confidence</div>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                st.markdown("""
-                <div class="warning-box">
-                    <strong>⚠️ Assessment: Suspicious for Melanoma</strong><br>
-                    This lesion shows features concerning for melanoma. 
-                    <strong>Seek immediate dermatological evaluation.</strong>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            # Display confidence chart
-            st.plotly_chart(
-                create_confidence_chart(predictions, class_names), 
-                use_container_width=True
-            )
-            
-            # Detailed breakdown
-            st.subheader("📋 Detailed Analysis")
-            for i, (class_name, desc, conf) in enumerate(zip(class_names, class_descriptions, predictions)):
-                if i == 0:
-                    emoji = "🟢"
-                elif i == 1:
-                    emoji = "🟡"
-                else:
-                    emoji = "🔴"
-                    
-                st.write(f"{emoji} **{class_name}** ({desc}): {conf:.2%}")
-        
-        else:
-            st.info("👆 Upload an image and click 'Analyze' to see results")
-    
-    # Footer with medical disclaimer
-    st.markdown("---")
-    st.markdown("""
-    <div style='text-align: center; color: #666; font-size: 0.9rem;'>
-        <strong>⚠️ Medical Disclaimer:</strong> This AI tool is for educational and screening purposes only. 
-        It should not replace professional medical diagnosis. Always consult qualified healthcare providers 
-        for proper medical evaluation and treatment decisions.
-    </div>
-    """, unsafe_allow_html=True)
+    return interface
 
+# Create and launch the interface
 if __name__ == "__main__":
-    main()
+    demo = create_interface()
+    demo.launch(share=True)

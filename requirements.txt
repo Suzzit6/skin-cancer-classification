@@ -1,13 +1,6 @@
-# Create or update requirements.txt
-opencv-python-headless==4.8.1.78
-streamlit
-numpy
+gradio==4.44.0
 tensorflow==2.13.0
-pillow
-matplotlib
-seaborn
-scikit-learn
-albumentations
-torch
-torchvision
-plotly
+opencv-python-headless==4.8.1.78
+pillow==10.0.1
+matplotlib==3.7.2
+numpy==1.24.3
