@@ -1,5 +1,4 @@
 import streamlit as st
-import cv2
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
@@ -8,6 +7,13 @@ from PIL import Image
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+    st.warning("OpenCV not available. Some features may be limited.")
+
 
 # Set page config
 st.set_page_config(
